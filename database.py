@@ -29,9 +29,16 @@ class Database:
                 api_url TEXT NOT NULL,
                 api_key TEXT NOT NULL,
                 models TEXT,  -- JSON string or comma-separated list of models
+                provider_type TEXT DEFAULT 'openai',  -- openai, anthropic, gemini, etc.
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Migration: Add provider_type column if it doesn't exist
+        cursor.execute("PRAGMA table_info(providers)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'provider_type' not in columns:
+            cursor.execute("ALTER TABLE providers ADD COLUMN provider_type TEXT DEFAULT 'openai'")
 
         # Models table
         cursor.execute('''
@@ -468,14 +475,14 @@ class Database:
 
     # ============ Provider Management ============
 
-    def add_provider(self, name: str, api_url: str, api_key: str, models: str = '') -> int:
+    def add_provider(self, name: str, api_url: str, api_key: str, models: str = '', provider_type: str = 'openai') -> int:
         """Add new API provider"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO providers (name, api_url, api_key, models)
-            VALUES (?, ?, ?, ?)
-        ''', (name, api_url, api_key, models))
+            INSERT INTO providers (name, api_url, api_key, models, provider_type)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (name, api_url, api_key, models, provider_type))
         provider_id = cursor.lastrowid
         conn.commit()
         conn.close()
@@ -507,15 +514,15 @@ class Database:
         conn.commit()
         conn.close()
 
-    def update_provider(self, provider_id: int, name: str, api_url: str, api_key: str, models: str):
+    def update_provider(self, provider_id: int, name: str, api_url: str, api_key: str, models: str, provider_type: str = 'openai'):
         """Update provider information"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE providers
-            SET name = ?, api_url = ?, api_key = ?, models = ?
+            SET name = ?, api_url = ?, api_key = ?, models = ?, provider_type = ?
             WHERE id = ?
-        ''', (name, api_url, api_key, models, provider_id))
+        ''', (name, api_url, api_key, models, provider_type, provider_id))
         conn.commit()
         conn.close()
 

@@ -186,6 +186,17 @@
                     <input type="text" id="providerName" placeholder="例如: OpenAI" class="form-input">
                 </div>
                 <div class="form-group">
+                    <label>API类型</label>
+                    <select id="providerType" class="form-input">
+                        <option value="openai">OpenAI / 兼容接口</option>
+                        <option value="anthropic">Anthropic Claude</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="azure_openai">Azure OpenAI</option>
+                    </select>
+                    <small class="form-help">选择API提供商类型，大多数第三方服务使用OpenAI兼容接口</small>
+                </div>
+                <div class="form-group">
                     <label>API地址</label>
                     <input type="text" id="providerApiUrl" placeholder="https://api.openai.com" class="form-input">
                 </div>

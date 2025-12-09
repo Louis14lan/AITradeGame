@@ -41,7 +41,8 @@ def add_provider():
             name=data['name'],
             api_url=data['api_url'],
             api_key=data['api_key'],
-            models=data.get('models', '')
+            models=data.get('models', ''),
+            provider_type=data.get('provider_type', 'openai')
         )
         return jsonify({'id': provider_id, 'message': 'Provider added successfully'})
     except Exception as e:
@@ -292,6 +293,7 @@ def execute_trading(model_id):
             db=db,
             market_fetcher=market_fetcher,
             ai_trader=AITrader(
+                provider_type=provider.get('provider_type', 'openai'),
                 api_key=provider['api_key'],
                 api_url=provider['api_url'],
                 model_name=model['model_name']
@@ -532,6 +534,7 @@ def init_trading_engines():
                     db=db,
                     market_fetcher=market_fetcher,
                     ai_trader=AITrader(
+                        provider_type=provider.get('provider_type', 'openai'),
                         api_key=provider['api_key'],
                         api_url=provider['api_url'],
                         model_name=model['model_name']

@@ -649,6 +649,7 @@ class TradingApp {
 
     clearApiProviderForm() {
         document.getElementById('providerName').value = '';
+        document.getElementById('providerType').value = 'openai';
         document.getElementById('providerApiUrl').value = '';
         document.getElementById('providerApiKey').value = '';
         document.getElementById('availableModels').value = '';
@@ -657,6 +658,7 @@ class TradingApp {
     async saveApiProvider() {
         const data = {
             name: document.getElementById('providerName').value.trim(),
+            provider_type: document.getElementById('providerType').value,
             api_url: document.getElementById('providerApiUrl').value.trim(),
             api_key: document.getElementById('providerApiKey').value,
             models: document.getElementById('availableModels').value.trim()
@@ -746,14 +748,23 @@ class TradingApp {
             return;
         }
 
+        const providerTypeLabels = {
+            'openai': 'OpenAI',
+            'anthropic': 'Anthropic',
+            'gemini': 'Gemini',
+            'deepseek': 'DeepSeek',
+            'azure_openai': 'Azure OpenAI'
+        };
+
         container.innerHTML = providers.map(provider => {
             const models = provider.models ? provider.models.split(',').map(m => m.trim()) : [];
             const modelsHtml = models.map(model => `<span class="model-tag">${model}</span>`).join('');
+            const providerTypeLabel = providerTypeLabels[provider.provider_type] || provider.provider_type || 'OpenAI';
 
             return `
                 <div class="provider-item">
                     <div class="provider-info">
-                        <div class="provider-name">${provider.name}</div>
+                        <div class="provider-name">${provider.name} <span class="provider-type-badge">${providerTypeLabel}</span></div>
                         <div class="provider-url">${provider.api_url}</div>
                         <div class="provider-models">${modelsHtml}</div>
                     </div>
