@@ -12,9 +12,10 @@ class AITrader:
     def make_decision(self, market_state: Dict, portfolio: Dict, 
                      account_info: Dict) -> Dict:
         prompt = self._build_prompt(market_state, portfolio, account_info)
+        print(f"[INFO] Prompt: {prompt}")
         
         response = self._call_llm(prompt)
-        
+        print(f"[INFO] Response: {response}")
         decisions = self._parse_response(response)
         
         return decisions
@@ -123,8 +124,9 @@ Analyze and output JSON only.
                     }
                 ],
                 temperature=0.7,
-                max_tokens=2000
+                max_tokens=8000
             )
+            print(f"[INFO] Response: {response}")
             
             return response.choices[0].message.content
             

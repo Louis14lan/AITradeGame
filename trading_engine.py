@@ -20,10 +20,14 @@ class TradingEngine:
             portfolio = self.db.get_portfolio(self.model_id, current_prices)
             
             account_info = self._build_account_info(portfolio)
-            
+            print(f"[INFO] Current prices: {current_prices}")
+            print(f"[INFO] Account info: {account_info}")
+            print(f"[INFO] Market state: {market_state}")
+            print(f"[INFO] Portfolio: {portfolio}")
             decisions = self.ai_trader.make_decision(
                 market_state, portfolio, account_info
             )
+            print(f"[INFO] Decisions: {decisions}")
             
             self.db.add_conversation(
                 self.model_id,

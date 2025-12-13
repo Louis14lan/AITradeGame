@@ -1,6 +1,7 @@
 """
 Market data module - Multi-source API integration with fallback
-Supports: Binance, CoinCap, CoinGecko with rate limiting and caching
+Supports: OKX, Gate.io, Binance, CoinGecko, CoinCap with rate limiting and caching
+(OKX and Gate.io are prioritized for China mainland users)
 """
 import requests
 import time
@@ -15,8 +16,10 @@ class RateLimiter:
         self._last_request_time: Dict[str, float] = {}
         self._min_intervals: Dict[str, float] = {
             'binance': 0.5,      # 500ms between requests
-            'coingecko': 3.0,    # 3s between requests (strict limit)
+            'coingecko': 10,     # 10s between requests (strict limit)
             'coincap': 1.0,      # 1s between requests
+            'okx': 0.5,          # 500ms between requests
+            'gateio': 0.5,       # 500ms between requests
         }
         self._lock = threading.Lock()
     
@@ -42,6 +45,8 @@ class MarketDataFetcher:
         self.binance_base_url = "https://api.binance.com/api/v3"
         self.coingecko_base_url = "https://api.coingecko.com/api/v3"
         self.coincap_base_url = "https://api.coincap.io/v2"
+        self.okx_base_url = "https://www.okx.com/api/v5"
+        self.gateio_base_url = "https://api.gateio.ws/api/v4"
         
         # Binance symbol mapping
         self.binance_symbols = {
@@ -71,6 +76,26 @@ class MarketDataFetcher:
             'BNB': 'binance-coin',
             'XRP': 'xrp',
             'DOGE': 'dogecoin'
+        }
+        
+        # OKX symbol mapping
+        self.okx_symbols = {
+            'BTC': 'BTC-USDT',
+            'ETH': 'ETH-USDT',
+            'SOL': 'SOL-USDT',
+            'BNB': 'BNB-USDT',
+            'XRP': 'XRP-USDT',
+            'DOGE': 'DOGE-USDT'
+        }
+        
+        # Gate.io symbol mapping
+        self.gateio_symbols = {
+            'BTC': 'BTC_USDT',
+            'ETH': 'ETH_USDT',
+            'SOL': 'SOL_USDT',
+            'BNB': 'BNB_USDT',
+            'XRP': 'XRP_USDT',
+            'DOGE': 'DOGE_USDT'
         }
         
         # Cache settings - extended duration
@@ -128,6 +153,8 @@ class MarketDataFetcher:
             try:
                 # Rate limiting
                 self._rate_limiter.wait_if_needed(api_name)
+
+                print(f"[INFO] Requesting {url} with params {params}")
                 
                 response = requests.get(url, params=params, timeout=timeout)
                 
@@ -162,19 +189,29 @@ class MarketDataFetcher:
         if cached:
             return cached
         
-        # Try APIs in order: CoinGecko -> CoinCap -> Binance
-        # (CoinGecko is most reliable, CoinCap/Binance may have geo-restrictions)
-        prices = self._get_prices_from_coingecko(coins)
+        # Try APIs in order: OKX -> Gate.io -> Binance -> CoinGecko -> CoinCap
+        # (OKX and Gate.io are China-friendly, prioritized for mainland users)
+        prices = self._get_prices_from_okx(coins)
         
         if not prices or len(prices) < len(coins):
-            coincap_prices = self._get_prices_from_coincap(coins)
-            if coincap_prices:
-                prices = coincap_prices
+            gateio_prices = self._get_prices_from_gateio(coins)
+            if gateio_prices:
+                prices = gateio_prices
         
         if not prices or len(prices) < len(coins):
             binance_prices = self._get_prices_from_binance(coins)
             if binance_prices:
                 prices = binance_prices
+        
+        if not prices or len(prices) < len(coins):
+            coingecko_prices = self._get_prices_from_coingecko(coins)
+            if coingecko_prices:
+                prices = coingecko_prices
+        
+        if not prices or len(prices) < len(coins):
+            coincap_prices = self._get_prices_from_coincap(coins)
+            if coincap_prices:
+                prices = coincap_prices
         
         # If all APIs failed, try stale cache
         if not prices:
@@ -276,6 +313,92 @@ class MarketDataFetcher:
             print(f"[ERROR] Binance API failed: {e}")
             return {}
     
+    def _get_prices_from_okx(self, coins: List[str]) -> Dict[str, Dict]:
+        """Fetch prices from OKX API (China-friendly)"""
+        try:
+            prices = {}
+            
+            for coin in coins:
+                if coin not in self.okx_symbols:
+                    continue
+                
+                symbol = self.okx_symbols[coin]
+                response = self._request_with_retry(
+                    'okx',
+                    f"{self.okx_base_url}/market/ticker",
+                    params={'instId': symbol},
+                    timeout=10
+                )
+                
+                if not response:
+                    continue
+                
+                data = response.json()
+                if data.get('code') == '0' and data.get('data'):
+                    ticker = data['data'][0]
+                    last_price = float(ticker['last'])
+                    open_24h = float(ticker.get('open24h', 0) or ticker.get('sodUtc8', 0) or last_price)
+                    
+                    if open_24h > 0:
+                        change_24h = ((last_price - open_24h) / open_24h) * 100
+                    else:
+                        change_24h = 0
+                    
+                    prices[coin] = {
+                        'price': last_price,
+                        'change_24h': change_24h
+                    }
+            
+            if prices:
+                print(f"[INFO] Got prices from OKX: {list(prices.keys())}")
+            return prices
+            
+        except Exception as e:
+            print(f"[ERROR] OKX API failed: {e}")
+            return {}
+    
+    def _get_prices_from_gateio(self, coins: List[str]) -> Dict[str, Dict]:
+        """Fetch prices from Gate.io API (China-friendly)"""
+        try:
+            # Gate.io supports batch query
+            currency_pairs = [self.gateio_symbols[coin] for coin in coins 
+                            if coin in self.gateio_symbols]
+            
+            if not currency_pairs:
+                return {}
+            
+            response = self._request_with_retry(
+                'gateio',
+                f"{self.gateio_base_url}/spot/tickers",
+                timeout=10
+            )
+            
+            if not response:
+                return {}
+            
+            data = response.json()
+            prices = {}
+            
+            # Create a reverse mapping for lookup
+            symbol_to_coin = {v: k for k, v in self.gateio_symbols.items()}
+            
+            for ticker in data:
+                currency_pair = ticker.get('currency_pair')
+                if currency_pair in symbol_to_coin:
+                    coin = symbol_to_coin[currency_pair]
+                    prices[coin] = {
+                        'price': float(ticker['last']),
+                        'change_24h': float(ticker.get('change_percentage', 0) or 0)
+                    }
+            
+            if prices:
+                print(f"[INFO] Got prices from Gate.io: {list(prices.keys())}")
+            return prices
+            
+        except Exception as e:
+            print(f"[ERROR] Gate.io API failed: {e}")
+            return {}
+    
     def _get_prices_from_coingecko(self, coins: List[str]) -> Dict[str, Dict]:
         """Fetch prices from CoinGecko API"""
         try:
@@ -307,7 +430,7 @@ class MarketDataFetcher:
                     }
             
             if prices:
-                print(f"[INFO] Got prices from CoinGecko: {list(prices.keys())}")
+                print(f"[INFO] Got prices from CoinGecko: {list(prices.keys())} {prices}")
             return prices
             
         except Exception as e:
