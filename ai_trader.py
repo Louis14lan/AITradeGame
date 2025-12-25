@@ -20,68 +20,266 @@ class AITrader:
         
         return decisions
     
-    def _build_prompt(self, market_state: Dict, portfolio: Dict, 
+    def _build_prompt(self, market_state: Dict, portfolio: Dict,
                      account_info: Dict) -> str:
-        prompt = f"""You are a professional cryptocurrency trader. Analyze the market and make trading decisions.
+        """构建系统化的交易决策 Prompt，提供完整的市场数据让 AI 自主分析和决策"""
 
-MARKET DATA:
-"""
-        for coin, data in market_state.items():
-            prompt += f"{coin}: ${data['price']:.2f} ({data['change_24h']:+.2f}%)\n"
-            if 'indicators' in data and data['indicators']:
-                indicators = data['indicators']
-                prompt += f"  SMA7: ${indicators.get('sma_7', 0):.2f}, SMA14: ${indicators.get('sma_14', 0):.2f}, RSI: {indicators.get('rsi_14', 0):.1f}\n"
-        
-        prompt += f"""
-ACCOUNT STATUS:
-- Initial Capital: ${account_info['initial_capital']:.2f}
-- Total Value: ${portfolio['total_value']:.2f}
-- Cash: ${portfolio['cash']:.2f}
-- Total Return: {account_info['total_return']:.2f}%
+        # === 市场概况分析 ===
+        market_summary = self._analyze_market_overview(market_state)
 
-CURRENT POSITIONS:
-"""
-        if portfolio['positions']:
-            for pos in portfolio['positions']:
-                prompt += f"- {pos['coin']} {pos['side']}: {pos['quantity']:.4f} @ ${pos['avg_price']:.2f} ({pos['leverage']}x)\n"
-        else:
-            prompt += "None\n"
-        
-        prompt += """
-TRADING RULES:
-1. Signals: buy_to_enter (long), sell_to_enter (short), close_position, hold
-2. Risk Management:
-   - Max 3 positions
-   - Risk 1-5% per trade
-   - Use appropriate leverage (1-20x)
-3. Position Sizing:
-   - Conservative: 1-2% risk
-   - Moderate: 2-4% risk
-   - Aggressive: 4-5% risk
-4. Exit Strategy:
-   - Close losing positions quickly
-   - Let winners run
-   - Use technical indicators
+        # === 个币详细数据 ===
+        coins_analysis = self._format_coins_data(market_state)
 
-OUTPUT FORMAT (JSON only):
+        # === 账户和持仓状态 ===
+        account_status = self._format_account_status(portfolio, account_info)
+
+        # === 构建主 Prompt ===
+        prompt = f"""You are a professional cryptocurrency quantitative trader with expertise in technical analysis and risk management. Your decision frequency is every 3 minutes.
+
+=== MARKET OVERVIEW ===
+{market_summary}
+
+=== DETAILED MARKET DATA ===
+{coins_analysis}
+
+=== ACCOUNT & POSITIONS ===
+{account_status}
+
+=== TRADING FRAMEWORK ===
+Decision Signals:
+- buy_to_enter: Open long position
+- sell_to_enter: Open short position
+- close_position: Close existing position
+- hold: No action needed
+
+Risk Management Constraints:
+- Maximum 10 concurrent positions
+- Risk per trade: 1-5% of portfolio
+- Leverage range: 1-20x (use conservatively)
+- Stop-loss is mandatory for all positions
+
+Your Task:
+1. Analyze each asset's trend, momentum, and volatility
+2. Verify trend strength with volume confirmation
+3. Identify high-probability trading opportunities
+4. Determine optimal entry/exit points using technical indicators
+5. Set appropriate leverage, profit targets, and stop-losses
+6. Manage existing positions based on current market conditions
+
+Key Principles:
+- Cut losses quickly when trend reverses
+- Let profitable positions run with trailing stops
+- Avoid overtrading - quality over quantity
+- Consider correlation between assets
+- Adapt position sizing to volatility levels
+
+Volume Analysis Guidelines:
+- HIGH volume (ratio >1.5x) confirms trend strength
+- LOW volume (ratio <0.5x) suggests weak trend, avoid entry
+- INCREASING volume + uptrend = strong bullish signal
+- DECREASING volume + uptrend = potential reversal warning
+- Price-Volume DIVERGENCE signals possible trend reversal
+- Volume breakout (>2x avg) on support/resistance = valid breakout
+
+OUTPUT FORMAT (JSON only, no explanations):
 ```json
-{
-  "COIN": {
-    "signal": "buy_to_enter|sell_to_enter|hold|close_position",
+{{
+  "COIN_SYMBOL": {{
+    "signal": "buy_to_enter|sell_to_enter|close_position|hold",
     "quantity": 0.5,
-    "leverage": 10,
+    "leverage": 5,
     "profit_target": 45000.0,
     "stop_loss": 42000.0,
-    "confidence": 0.75,
-    "justification": "Brief reason"
-  }
-}
+    "confidence": 0.8,
+    "justification": "Concise technical reason (max 20 words)"
+  }}
+}}
 ```
 
-Analyze and output JSON only.
+Analyze the data and provide your trading decisions in JSON format only.
 """
-        
+
         return prompt
+
+    def _analyze_market_overview(self, market_state: Dict) -> str:
+        """分析整体市场状况"""
+        if not market_state:
+            return "No market data available"
+
+        # 统计市场情绪
+        bullish_count = 0
+        bearish_count = 0
+        neutral_count = 0
+        high_volatility_count = 0
+
+        total_change_24h = 0
+
+        for coin, data in market_state.items():
+            total_change_24h += data.get('change_24h', 0)
+
+            if 'indicators' in data:
+                ind = data['indicators']
+                trend = ind.get('trend_direction', 'neutral')
+                volatility = ind.get('volatility_level', 'medium')
+
+                if trend == 'bullish':
+                    bullish_count += 1
+                elif trend == 'bearish':
+                    bearish_count += 1
+                else:
+                    neutral_count += 1
+
+                if volatility == 'high':
+                    high_volatility_count += 1
+
+        total_coins = len(market_state)
+        avg_change_24h = total_change_24h / total_coins if total_coins > 0 else 0
+
+        # 判断市场情绪
+        if bullish_count > bearish_count * 1.5:
+            market_sentiment = "BULLISH"
+        elif bearish_count > bullish_count * 1.5:
+            market_sentiment = "BEARISH"
+        else:
+            market_sentiment = "NEUTRAL/MIXED"
+
+        # 判断波动率环境
+        volatility_env = "HIGH" if high_volatility_count > total_coins / 2 else "NORMAL"
+
+        summary = f"""Market Sentiment: {market_sentiment} ({bullish_count} bullish, {bearish_count} bearish, {neutral_count} neutral)
+Average 24h Change: {avg_change_24h:+.2f}%
+Volatility Environment: {volatility_env}
+Total Assets Tracked: {total_coins}"""
+
+        return summary
+
+    def _format_coins_data(self, market_state: Dict) -> str:
+        """格式化每个币种的详细数据"""
+        if not market_state:
+            return "No coin data available"
+
+        coins_text = ""
+
+        for coin, data in sorted(market_state.items()):
+            price = data.get('price', 0)
+            change_24h = data.get('change_24h', 0)
+
+            coins_text += f"\n[{coin}] Price: ${price:,.2f} | 24h: {change_24h:+.2f}%\n"
+
+            if 'indicators' in data and data['indicators']:
+                ind = data['indicators']
+
+                # 趋势信息
+                trend_dir = ind.get('trend_direction', 'neutral').upper()
+                trend_strength = ind.get('trend_strength', 0)
+                coins_text += f"  Trend: {trend_dir} (Strength: {trend_strength:+.1f})\n"
+
+                # EMA 趋势
+                ema_9 = ind.get('ema_9', 0)
+                ema_21 = ind.get('ema_21', 0)
+                ema_50 = ind.get('ema_50', 0)
+                coins_text += f"  EMA: 9=${ema_9:,.2f} | 21=${ema_21:,.2f} | 50=${ema_50:,.2f}\n"
+
+                # MACD
+                macd = ind.get('macd', 0)
+                macd_signal = ind.get('macd_signal', 0)
+                macd_hist = ind.get('macd_histogram', 0)
+                macd_cross = "BULLISH CROSS" if macd_hist > 0 else "BEARISH CROSS" if macd_hist < 0 else "NEUTRAL"
+                coins_text += f"  MACD: {macd:.2f} | Signal: {macd_signal:.2f} | Histogram: {macd_hist:.2f} ({macd_cross})\n"
+
+                # 动量指标
+                rsi = ind.get('rsi_14', 50)
+                stoch_rsi = ind.get('stoch_rsi', 50)
+                roc = ind.get('roc_10', 0)
+
+                rsi_status = "OVERBOUGHT" if rsi > 70 else "OVERSOLD" if rsi < 30 else "NEUTRAL"
+                coins_text += f"  RSI: {rsi:.1f} ({rsi_status}) | Stoch RSI: {stoch_rsi:.1f} | ROC(10d): {roc:+.2f}%\n"
+
+                # 布林带
+                bb_upper = ind.get('bb_upper', 0)
+                bb_middle = ind.get('bb_middle', 0)
+                bb_lower = ind.get('bb_lower', 0)
+                bb_width = ind.get('bb_width', 0)
+                price_pos = ind.get('price_position', 'middle').upper()
+                coins_text += f"  Bollinger: Upper=${bb_upper:,.2f} | Mid=${bb_middle:,.2f} | Lower=${bb_lower:,.2f}\n"
+                coins_text += f"  BB Width: {bb_width:.2f}% | Price Position: {price_pos}\n"
+
+                # 波动率和ATR
+                atr = ind.get('atr_14', 0)
+                volatility = ind.get('volatility_level', 'medium').upper()
+                coins_text += f"  ATR(14): ${atr:,.2f} | Volatility: {volatility}\n"
+
+                # 多周期价格变化
+                change_1h = ind.get('change_1h', 0)
+                change_4h = ind.get('change_4h', 0)
+                change_7d = ind.get('change_7d', 0)
+                coins_text += f"  Price Changes: 1h {change_1h:+.2f}% | 4h {change_4h:+.2f}% | 7d {change_7d:+.2f}%\n"
+
+                # 成交量分析
+                volume_24h = ind.get('volume_24h', 0)
+                volume_ma_20 = ind.get('volume_ma_20', 0)
+                volume_ratio = ind.get('volume_ratio', 1.0)
+                volume_trend = ind.get('volume_trend', 'stable').upper()
+                pv_divergence = ind.get('price_volume_divergence', 'none').upper()
+
+                # Format volume with K/M/B suffix
+                def format_volume(vol):
+                    if vol >= 1e9:
+                        return f"${vol/1e9:.2f}B"
+                    elif vol >= 1e6:
+                        return f"${vol/1e6:.2f}M"
+                    elif vol >= 1e3:
+                        return f"${vol/1e3:.2f}K"
+                    else:
+                        return f"${vol:.2f}"
+
+                volume_status = "HIGH" if volume_ratio > 1.5 else "LOW" if volume_ratio < 0.5 else "NORMAL"
+                coins_text += f"  Volume 24h: {format_volume(volume_24h)} | Avg(20d): {format_volume(volume_ma_20)} | Ratio: {volume_ratio:.2f}x ({volume_status})\n"
+                coins_text += f"  Volume Trend: {volume_trend}"
+
+                if pv_divergence != 'NONE':
+                    coins_text += f" | ⚠️  Price-Volume Divergence: {pv_divergence}"
+                coins_text += "\n"
+
+        return coins_text.strip()
+
+    def _format_account_status(self, portfolio: Dict, account_info: Dict) -> str:
+        """格式化账户和持仓状态"""
+        initial_capital = account_info.get('initial_capital', 0)
+        total_value = portfolio.get('total_value', 0)
+        cash = portfolio.get('cash', 0)
+        total_return = account_info.get('total_return', 0)
+
+        status_text = f"""Portfolio Summary:
+- Initial Capital: ${initial_capital:,.2f}
+- Current Total Value: ${total_value:,.2f}
+- Available Cash: ${cash:,.2f}
+- Total Return: {total_return:+.2f}%
+- Cash Utilization: {((initial_capital - cash) / initial_capital * 100):.1f}%
+
+Active Positions:"""
+
+        positions = portfolio.get('positions', [])
+
+        if not positions:
+            status_text += "\n- No open positions"
+        else:
+            for pos in positions:
+                coin = pos.get('coin', 'N/A')
+                side = pos.get('side', 'N/A').upper()
+                quantity = pos.get('quantity', 0)
+                avg_price = pos.get('avg_price', 0)
+                leverage = pos.get('leverage', 1)
+
+                # 计算未实现盈亏（如果有当前价格）
+                unrealized_pnl = pos.get('unrealized_pnl', 0)
+                unrealized_pnl_pct = pos.get('unrealized_pnl_pct', 0)
+
+                status_text += f"\n- {coin} {side} | Qty: {quantity:.4f} @ ${avg_price:,.2f} | Leverage: {leverage}x"
+                if unrealized_pnl != 0:
+                    status_text += f" | P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.2f}%)"
+
+        return status_text
     
     def _call_llm(self, prompt: str) -> str:
         """Call LLM API based on provider type"""
