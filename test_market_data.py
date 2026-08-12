@@ -33,92 +33,30 @@ def print_warn(text):
 def print_info(text):
     print(f"{Colors.CYAN}ℹ {text}{Colors.RESET}")
 
-def test_coingecko_direct():
-    """直接测试 CoinGecko API"""
+def test_gateio_direct():
+    """直接测试 Gate.io API"""
     import requests
-    print_header("测试 CoinGecko API (直接调用)")
-    
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price"
-        params = {
-            'ids': 'bitcoin,ethereum',
-            'vs_currencies': 'usd',
-            'include_24hr_change': 'true'
-        }
-        
-        start = time.time()
-        response = requests.get(url, params=params, timeout=10)
-        elapsed = time.time() - start
-        
-        if response.status_code == 200:
-            data = response.json()
-            print_success(f"CoinGecko API 可用 (响应时间: {elapsed*1000:.0f}ms)")
-            print(f"   BTC: ${data['bitcoin']['usd']:,.2f}")
-            print(f"   ETH: ${data['ethereum']['usd']:,.2f}")
-            return True
-        elif response.status_code == 429:
-            print_warn(f"CoinGecko API 限流 (429) - 请稍后重试")
-            return False
-        else:
-            print_error(f"CoinGecko API 错误: {response.status_code}")
-            return False
-    except Exception as e:
-        print_error(f"CoinGecko API 失败: {e}")
-        return False
+    print_header("测试 Gate.io API (直接调用)")
 
-def test_coincap_direct():
-    """直接测试 CoinCap API"""
-    import requests
-    print_header("测试 CoinCap API (直接调用)")
-    
     try:
-        url = "https://api.coincap.io/v2/assets"
-        params = {'ids': 'bitcoin,ethereum'}
-        
-        start = time.time()
-        response = requests.get(url, params=params, timeout=10)
-        elapsed = time.time() - start
-        
-        if response.status_code == 200:
-            data = response.json()
-            print_success(f"CoinCap API 可用 (响应时间: {elapsed*1000:.0f}ms)")
-            for asset in data.get('data', []):
-                print(f"   {asset['symbol']}: ${float(asset['priceUsd']):,.2f}")
-            return True
-        else:
-            print_error(f"CoinCap API 错误: {response.status_code}")
-            return False
-    except Exception as e:
-        print_error(f"CoinCap API 失败: {e}")
-        return False
+        url = "https://api.gateio.ws/api/v4/spot/tickers"
+        params = {'currency_pair': 'BTC_USDT'}
 
-def test_binance_direct():
-    """直接测试 Binance API"""
-    import requests
-    print_header("测试 Binance API (直接调用)")
-    
-    try:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        params = {'symbols': '["BTCUSDT","ETHUSDT"]'}
-        
         start = time.time()
         response = requests.get(url, params=params, timeout=10)
         elapsed = time.time() - start
-        
+
         if response.status_code == 200:
             data = response.json()
-            print_success(f"Binance API 可用 (响应时间: {elapsed*1000:.0f}ms)")
-            for item in data:
-                print(f"   {item['symbol']}: ${float(item['lastPrice']):,.2f}")
+            print_success(f"Gate.io API 可用 (响应时间: {elapsed*1000:.0f}ms)")
+            for ticker in data:
+                print(f"   {ticker['currency_pair']}: ${float(ticker['last']):,.2f}")
             return True
-        elif response.status_code == 451:
-            print_warn("Binance API 地理限制 (451) - 您的地区无法访问")
-            return False
         else:
-            print_error(f"Binance API 错误: {response.status_code}")
+            print_error(f"Gate.io API 错误: {response.status_code}")
             return False
     except Exception as e:
-        print_error(f"Binance API 失败: {e}")
+        print_error(f"Gate.io API 失败: {e}")
         return False
 
 def test_market_data_fetcher():
@@ -128,7 +66,6 @@ def test_market_data_fetcher():
     fetcher = MarketDataFetcher()
     results = {
         'get_current_prices': False,
-        'get_market_data': False,
         'get_historical_prices': False,
         'calculate_technical_indicators': False,
         'cache': False,
@@ -172,26 +109,7 @@ def test_market_data_fetcher():
     except Exception as e:
         print_error(f"缓存测试失败: {e}")
     
-    # 测试 3: 获取市场数据
-    print_header("测试 MarketDataFetcher.get_market_data()")
-    try:
-        start = time.time()
-        market_data = fetcher.get_market_data('BTC')
-        elapsed = time.time() - start
-        
-        if market_data:
-            print_success(f"获取市场数据成功 (耗时: {elapsed:.2f}s)")
-            print(f"   当前价格: ${market_data.get('current_price', 0):,.2f}")
-            print(f"   市值: ${market_data.get('market_cap', 0):,.0f}")
-            print(f"   24h交易量: ${market_data.get('total_volume', 0):,.0f}")
-            print(f"   24h涨跌: {market_data.get('price_change_24h', 0):.2f}%")
-            results['get_market_data'] = True
-        else:
-            print_warn("获取市场数据返回空 - 可能所有API都失败")
-    except Exception as e:
-        print_error(f"获取市场数据失败: {e}")
-    
-    # 测试 4: 获取历史价格
+    # 测试 3: 获取历史价格
     print_header("测试 MarketDataFetcher.get_historical_prices()")
     try:
         start = time.time()
@@ -208,7 +126,7 @@ def test_market_data_fetcher():
     except Exception as e:
         print_error(f"获取历史数据失败: {e}")
     
-    # 测试 5: 技术指标计算
+    # 测试 4: 技术指标计算
     print_header("测试 MarketDataFetcher.calculate_technical_indicators()")
     try:
         start = time.time()
@@ -233,15 +151,15 @@ def test_market_data_fetcher():
 def test_fallback_mechanism():
     """测试降级机制"""
     from market_data import MarketDataFetcher
-    
+
     print_header("测试 Fallback 降级机制")
-    
+
     fetcher = MarketDataFetcher()
-    
+
     # 清空缓存以强制重新获取
     fetcher.clear_cache()
-    
-    print_info("正在测试多数据源 fallback...")
+
+    print_info("正在测试 Gate.io fallback...")
     prices = fetcher.get_current_prices(['BTC'])
     
     if prices and 'BTC' in prices:
@@ -262,20 +180,14 @@ def main():
     # 记录测试结果
     all_results = {}
     
-    # 1. 直接测试各个 API
-    all_results['CoinGecko'] = test_coingecko_direct()
+    # 1. 直接测试 Gate.io API
+    all_results['Gate.io'] = test_gateio_direct()
     time.sleep(1)  # 避免限流
-    
-    all_results['CoinCap'] = test_coincap_direct()
-    time.sleep(1)
-    
-    all_results['Binance'] = test_binance_direct()
-    time.sleep(1)
-    
+
     # 2. 测试 MarketDataFetcher 封装
     fetcher_results = test_market_data_fetcher()
     all_results.update(fetcher_results)
-    
+
     # 3. 测试 fallback 机制
     all_results['Fallback'] = test_fallback_mechanism()
     

@@ -4,7 +4,7 @@ import time
 import threading
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from trading_engine import TradingEngine
 from market_data import MarketDataFetcher
 from ai_trader import AITrader
@@ -18,7 +18,39 @@ db = Database('AITradeGame.db')
 market_fetcher = MarketDataFetcher()
 trading_engines = {}
 auto_trading = True
-TRADE_FEE_RATE = 0.001  # 默认交易费率
+TRADE_FEE_RATE = 0.002  # 默认交易费率：0.2%（双向收费）
+
+
+def parse_time_param(value):
+    """把前端传来的 ISO 时间字符串转成 SQLite 可比较的 UTC 'YYYY-MM-DD HH:MM:SS' 格式。
+
+    支持格式: 'YYYY-MM-DD HH:MM:SS'、'YYYY-MM-DDTHH:MM:SS'、带 Z / 时区偏移的 ISO8601。
+    库里的 timestamp 是 CURRENT_TIMESTAMP 生成的 UTC 时间，故统一转 UTC 后做字符串比较。
+    非法或空值返回 None。
+    """
+    if not value:
+        return None
+    try:
+        s = value.strip()
+        # 'Z' 结尾的 ISO8601 统一补成 +00:00，让 fromisoformat 能解析
+        if s.endswith('Z') or s.endswith('z'):
+            s = s[:-1] + '+00:00'
+        dt = datetime.fromisoformat(s)
+        # 带时区信息则转 UTC，naive 视为 UTC
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return None
+
+
+def get_time_params():
+    """从查询参数读取 start_time / end_time，返回解析后的 UTC 时间字符串。"""
+    return (
+        parse_time_param(request.args.get('start_time')),
+        parse_time_param(request.args.get('end_time'))
+    )
+
 
 @app.route('/')
 def index():
@@ -174,10 +206,16 @@ def delete_model(model_id):
 def get_portfolio(model_id):
     prices_data = market_fetcher.get_current_prices(['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE'])
     current_prices = {coin: prices_data[coin]['price'] for coin in prices_data}
-    
+
+    start_time, end_time = get_time_params()
+    # 有时间段筛选时放宽 limit，让时间范围成为实际边界
+    limit = 10000 if (start_time or end_time) else 100
+
     portfolio = db.get_portfolio(model_id, current_prices)
-    account_value = db.get_account_value_history(model_id, limit=100)
-    
+    account_value = db.get_account_value_history(
+        model_id, limit=limit, start_time=start_time, end_time=end_time
+    )
+
     return jsonify({
         'portfolio': portfolio,
         'account_value_history': account_value
@@ -185,14 +223,26 @@ def get_portfolio(model_id):
 
 @app.route('/api/models/<int:model_id>/trades', methods=['GET'])
 def get_trades(model_id):
-    limit = request.args.get('limit', 50, type=int)
-    trades = db.get_trades(model_id, limit=limit)
+    start_time, end_time = get_time_params()
+    limit = 2000 if (start_time or end_time) else request.args.get('limit', 50, type=int)
+    trades = db.get_trades(model_id, limit=limit, start_time=start_time, end_time=end_time)
     return jsonify(trades)
+
+@app.route('/api/models/<int:model_id>/round_trips', methods=['GET'])
+def get_round_trips(model_id):
+    """获取回合配对交易视图（含复盘统计）"""
+    start_time, end_time = get_time_params()
+    limit = 2000 if (start_time or end_time) else request.args.get('limit', 100, type=int)
+    data = db.get_round_trips(model_id, limit=limit, start_time=start_time, end_time=end_time)
+    return jsonify(data)
 
 @app.route('/api/models/<int:model_id>/conversations', methods=['GET'])
 def get_conversations(model_id):
-    limit = request.args.get('limit', 20, type=int)
-    conversations = db.get_conversations(model_id, limit=limit)
+    start_time, end_time = get_time_params()
+    limit = 1000 if (start_time or end_time) else request.args.get('limit', 20, type=int)
+    conversations = db.get_conversations(
+        model_id, limit=limit, start_time=start_time, end_time=end_time
+    )
     return jsonify(conversations)
 
 @app.route('/api/aggregated/portfolio', methods=['GET'])
@@ -255,7 +305,11 @@ def get_aggregated_portfolio():
     total_portfolio['positions'] = list(all_positions.values())
 
     # Get multi-model chart data
-    chart_data = db.get_multi_model_chart_data(limit=100)
+    start_time, end_time = get_time_params()
+    limit = 10000 if (start_time or end_time) else 100
+    chart_data = db.get_multi_model_chart_data(
+        limit=limit, start_time=start_time, end_time=end_time
+    )
 
     return jsonify({
         'portfolio': total_portfolio,
@@ -315,10 +369,18 @@ def trading_loop():
             if not trading_engines:
                 time.sleep(30)
                 continue
-            
+
+            # 读取交易频率设置（分钟），前端设置弹窗修改后立即生效
+            try:
+                interval_minutes = int(db.get_settings().get('trading_frequency_minutes') or 60)
+            except Exception:
+                interval_minutes = 60
+            interval_minutes = max(1, min(interval_minutes, 1440))  # 限制 1-1440 分钟
+
             print(f"\n{'='*60}")
             print(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"[INFO] Active models: {len(trading_engines)}")
+            print(f"[INFO] Trading interval: {interval_minutes} minutes")
             print(f"{'='*60}")
             
             for model_id, engine in list(trading_engines.items()):
@@ -346,10 +408,10 @@ def trading_loop():
                     continue
             
             print(f"\n{'='*60}")
-            print(f"[SLEEP] Waiting 3 minutes for next cycle")
+            print(f"[SLEEP] Waiting {interval_minutes} minutes for next cycle")
             print(f"{'='*60}\n")
-            
-            time.sleep(180)
+
+            time.sleep(interval_minutes * 60)
             
         except Exception as e:
             print(f"\n[CRITICAL] Trading loop error: {e}")
@@ -399,7 +461,7 @@ def update_settings():
     try:
         data = request.json
         trading_frequency_minutes = int(data.get('trading_frequency_minutes', 60))
-        trading_fee_rate = float(data.get('trading_fee_rate', 0.001))
+        trading_fee_rate = float(data.get('trading_fee_rate', 0.002))
 
         success = db.update_settings(trading_frequency_minutes, trading_fee_rate)
 

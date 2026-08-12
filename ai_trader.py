@@ -9,9 +9,12 @@ class AITrader:
         self.api_url = api_url
         self.model_name = model_name
     
-    def make_decision(self, market_state: Dict, portfolio: Dict, 
-                     account_info: Dict) -> Dict:
-        prompt = self._build_prompt(market_state, portfolio, account_info)
+    def make_decision(self, market_state: Dict, portfolio: Dict,
+                     account_info: Dict, trade_fee_rate: float = 0.002,
+                     trading_interval_minutes: int = 60) -> Dict:
+        prompt = self._build_prompt(
+            market_state, portfolio, account_info, trade_fee_rate, trading_interval_minutes
+        )
         print(f"[INFO] Prompt: {prompt}")
         
         response = self._call_llm(prompt)
@@ -21,7 +24,8 @@ class AITrader:
         return decisions
     
     def _build_prompt(self, market_state: Dict, portfolio: Dict,
-                     account_info: Dict) -> str:
+                     account_info: Dict, trade_fee_rate: float = 0.002,
+                     trading_interval_minutes: int = 60) -> str:
         """构建系统化的交易决策 Prompt，提供完整的市场数据让 AI 自主分析和决策"""
 
         # === 市场概况分析 ===
@@ -33,8 +37,12 @@ class AITrader:
         # === 账户和持仓状态 ===
         account_status = self._format_account_status(portfolio, account_info)
 
+        # === 手续费参数 ===
+        fee_pct = trade_fee_rate * 100
+        round_trip_pct = trade_fee_rate * 2 * 100
+
         # === 构建主 Prompt ===
-        prompt = f"""You are a professional cryptocurrency quantitative trader with expertise in technical analysis and risk management. Your decision frequency is every 3 minutes.
+        prompt = f"""You are a professional cryptocurrency quantitative trader with expertise in technical analysis and risk management. Your decision frequency is every {trading_interval_minutes} minutes. Align your analysis with this cadence: prefer signals that hold for at least one full interval and ignore short-lived noise that cannot cover transaction costs.
 
 === MARKET OVERVIEW ===
 {market_summary}
@@ -44,6 +52,14 @@ class AITrader:
 
 === ACCOUNT & POSITIONS ===
 {account_status}
+
+=== TRANSACTION COSTS (MUST account for fees) ===
+- Fee rate: {fee_pct:.1f}% charged on BOTH entry and exit (maker and taker identical)
+- A complete round-trip (open + close) costs {round_trip_pct:.1f}% of position value
+- ONLY open positions when expected profit clearly exceeds {round_trip_pct:.1f}%; otherwise the trade loses money after fees
+- Profit targets MUST cover fees: the system REJECTS entries whose profit target implies a price move below the round-trip cost, so always set a profit_target that clears it
+- Avoid overtrading: every round-trip erodes {round_trip_pct:.1f}% regardless of outcome
+- All P&L figures shown are NET of fees
 
 === TRADING FRAMEWORK ===
 Decision Signals:
@@ -57,6 +73,7 @@ Risk Management Constraints:
 - Risk per trade: 1-5% of portfolio
 - Leverage range: 1-20x (use conservatively)
 - Stop-loss is mandatory for all positions
+- Set stop_loss and profit_target for EVERY new position: the engine enforces them automatically
 
 Your Task:
 1. Analyze each asset's trend, momentum, and volatility
@@ -249,12 +266,16 @@ Total Assets Tracked: {total_coins}"""
         total_value = portfolio.get('total_value', 0)
         cash = portfolio.get('cash', 0)
         total_return = account_info.get('total_return', 0)
+        realized_pnl = portfolio.get('realized_pnl', 0)
+        total_fee = portfolio.get('total_fee', 0)
 
         status_text = f"""Portfolio Summary:
 - Initial Capital: ${initial_capital:,.2f}
-- Current Total Value: ${total_value:,.2f}
+- Current Total Value: ${total_value:,.2f} (net of fees)
 - Available Cash: ${cash:,.2f}
-- Total Return: {total_return:+.2f}%
+- Total Return: {total_return:+.2f}% (net of fees)
+- Realized P&L (net of fees): ${realized_pnl:+,.2f}
+- Cumulative Fees Paid: ${total_fee:,.2f}
 - Cash Utilization: {((initial_capital - cash) / initial_capital * 100):.1f}%
 
 Active Positions:"""
@@ -306,23 +327,25 @@ Active Positions:"""
             
             client = OpenAI(
                 api_key=self.api_key,
-                base_url=base_url
+                base_url=base_url,
+                timeout=60.0,      # 与其他 API 调用超时一致，避免慢时长时间挂起
+                max_retries=0      # 关掉默认自动重试，防止交易循环卡死
             )
-            
+
             response = client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a professional cryptocurrency trader. Output JSON format only."
+                        "content": "You are a professional cryptocurrency trader. Output JSON format only. Keep your reasoning concise and return the final JSON promptly."
                     },
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=0.7,
-                max_tokens=8000
+                temperature=0,       # 决策输出需要稳定，使用确定性采样
+                max_tokens=32000     # deepseek 是推理模型，预算不足会导致 content 为空、无任何交易信号
             )
             print(f"[INFO] Response: {response}")
             

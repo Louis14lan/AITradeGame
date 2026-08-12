@@ -363,6 +363,27 @@ body {
     color: var(--success);
 }
 
+/* 交易记录页统计：6 列网格 */
+.stats-grid.trade-stats {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.stats-grid.trade-stats .stat-card {
+    padding: 14px 16px;
+}
+
+.stats-grid.trade-stats .stat-value {
+    font-size: 20px;
+}
+
+@media (max-width: 1100px) {
+    .stats-grid.trade-stats {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
 .text-primary { color: var(--primary); }
 .text-success { color: var(--success); }
 .text-warning { color: var(--warning); }
@@ -398,6 +419,53 @@ body {
     font-size: 16px;
     font-weight: 600;
     color: var(--text-1);
+}
+
+/* Chart header with time range filter */
+.chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.chart-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.time-range-select {
+    width: auto;
+    min-width: 130px;
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+.custom-range-panel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.custom-range-panel label {
+    font-size: 12px;
+    color: var(--text-2);
+    white-space: nowrap;
+}
+
+.custom-range-panel .form-input {
+    width: auto;
+    padding: 5px 8px;
+    font-size: 13px;
+}
+
+.btn-sm {
+    padding: 5px 12px;
+    font-size: 13px;
 }
 
 .card-body {
@@ -478,6 +546,23 @@ body {
 
 .data-table tr:hover {
     background: var(--bg-2);
+}
+
+/* 表格上方的小标题（如"交易回合"） */
+.table-title {
+    padding: 12px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-2);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border-1);
+}
+
+/* 展开逐笔明细的按钮 */
+.trade-toggle-btn {
+    width: 100%;
+    justify-content: center;
+    margin-bottom: 12px;
 }
 
 .empty-state {

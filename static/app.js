@@ -9,6 +9,11 @@ class TradingApp {
             trades: null
         };
         this.isChinese = this.detectLanguage();
+        // 时间范围筛选状态
+        this.timeRange = '1d';            // 当前选中: 1h / 3h / 1d / 7d / custom
+        this.lastRange = '1d';            // 上一个预设值，用于取消自定义时恢复
+        this.customStartTime = null;      // 自定义起始时间（datetime-local 格式）
+        this.customEndTime = null;        // 自定义结束时间（datetime-local 格式）
         this.init();
     }
 
@@ -101,6 +106,125 @@ class TradingApp {
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
         });
+
+        // 交易记录：展开/收起逐笔流水明细
+        document.getElementById('toggleTradeDetail').addEventListener('click', () => this.toggleTradeDetail());
+
+        // 时间范围筛选
+        document.getElementById('timeRangeSelect').addEventListener('change', (e) => this.onTimeRangeChange(e.target.value));
+        document.getElementById('applyCustomRangeBtn').addEventListener('click', () => this.applyCustomRange());
+        document.getElementById('cancelCustomRangeBtn').addEventListener('click', () => this.cancelCustomRange());
+    }
+
+    toggleTradeDetail() {
+        const container = document.getElementById('tradeDetailContainer');
+        const icon = document.getElementById('tradeToggleIcon');
+        const isHidden = container.style.display === 'none';
+        container.style.display = isHidden ? '' : 'none';
+        icon.textContent = isHidden ? '▾' : '▸';
+    }
+
+    // ============ 时间范围筛选 ============
+
+    getTimeParams() {
+        // 根据当前选择生成 start_time / end_time 查询参数（UTC ISO，后端会转成 UTC 字符串比较）
+        const params = new URLSearchParams();
+        if (this.timeRange === 'custom') {
+            if (this.customStartTime && this.customEndTime) {
+                params.set('start_time', new Date(this.customStartTime).toISOString());
+                params.set('end_time', new Date(this.customEndTime).toISOString());
+            }
+        } else {
+            const end = new Date();
+            const start = new Date(end.getTime() - this.getRangeSeconds() * 1000);
+            params.set('start_time', start.toISOString());
+            params.set('end_time', end.toISOString());
+        }
+        return params;
+    }
+
+    getRangeSeconds() {
+        if (this.timeRange === 'custom') {
+            if (this.customStartTime && this.customEndTime) {
+                return Math.max(0, (new Date(this.customEndTime) - new Date(this.customStartTime)) / 1000);
+            }
+            return 24 * 60 * 60;  // 未应用自定义前按 1 天处理
+        }
+        const ranges = { '1h': 60 * 60, '3h': 3 * 60 * 60, '1d': 24 * 60 * 60, '7d': 7 * 24 * 60 * 60 };
+        return ranges[this.timeRange] || 24 * 60 * 60;
+    }
+
+    onTimeRangeChange(value) {
+        if (value === 'custom') {
+            this.timeRange = 'custom';
+            const panel = document.getElementById('customRangePanel');
+            // 首次打开时预填最近 24 小时
+            if (!this.customStartTime && !this.customEndTime) {
+                const now = new Date();
+                document.getElementById('startTimeInput').value = this.toLocalInputValue(
+                    new Date(now.getTime() - 24 * 60 * 60 * 1000));
+                document.getElementById('endTimeInput').value = this.toLocalInputValue(now);
+            }
+            panel.style.display = 'flex';
+        } else {
+            this.timeRange = value;
+            this.lastRange = value;
+            document.getElementById('customRangePanel').style.display = 'none';
+            this.reloadWithTimeFilter();
+        }
+    }
+
+    applyCustomRange() {
+        const start = document.getElementById('startTimeInput').value;
+        const end = document.getElementById('endTimeInput').value;
+        if (!start || !end) {
+            alert('请选择开始和结束时间');
+            return;
+        }
+        if (new Date(start) >= new Date(end)) {
+            alert('结束时间必须晚于开始时间');
+            return;
+        }
+        this.customStartTime = start;
+        this.customEndTime = end;
+        document.getElementById('customRangePanel').style.display = 'none';
+        this.reloadWithTimeFilter();
+    }
+
+    cancelCustomRange() {
+        document.getElementById('customRangePanel').style.display = 'none';
+        // 恢复到之前选择的预设
+        const restore = this.lastRange || '1d';
+        document.getElementById('timeRangeSelect').value = restore;
+        this.timeRange = restore;
+        this.reloadWithTimeFilter();
+    }
+
+    toLocalInputValue(date) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    reloadWithTimeFilter() {
+        if (this.isAggregatedView) {
+            this.loadAggregatedData();
+        } else if (this.currentModelId) {
+            this.loadModelData();
+        }
+    }
+
+    formatAxisDate(date) {
+        // 长时间段（>1天）x 轴显示 MM-DD HH:MM，短时间段只显示 HH:MM
+        const tz = { timeZone: 'Asia/Shanghai' };
+        if (this.getRangeSeconds() > 24 * 60 * 60) {
+            return date.toLocaleString('zh-CN', {
+                ...tz,
+                month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+            });
+        }
+        return date.toLocaleTimeString('zh-CN', {
+            ...tz, hour: '2-digit', minute: '2-digit'
+        });
     }
 
     async loadModels() {
@@ -176,16 +300,23 @@ class TradingApp {
         if (!this.currentModelId) return;
 
         try {
+            const timeParams = this.getTimeParams();
             const [portfolio, trades, conversations] = await Promise.all([
-                fetch(`/api/models/${this.currentModelId}/portfolio`).then(r => r.json()),
-                fetch(`/api/models/${this.currentModelId}/trades?limit=50`).then(r => r.json()),
-                fetch(`/api/models/${this.currentModelId}/conversations?limit=20`).then(r => r.json())
+                fetch(`/api/models/${this.currentModelId}/portfolio?${timeParams}`).then(r => r.json()),
+                fetch(`/api/models/${this.currentModelId}/trades?${timeParams}`).then(r => r.json()),
+                fetch(`/api/models/${this.currentModelId}/conversations?${timeParams}`).then(r => r.json())
             ]);
+
+            // 回合视图独立加载，失败时回退为空，不影响主面板
+            const roundTripsData = await fetch(`/api/models/${this.currentModelId}/round_trips?limit=100&${timeParams}`)
+                .then(r => r.json())
+                .catch(() => ({ round_trips: [], stats: {} }));
 
             this.updateStats(portfolio.portfolio, false);
             this.updateSingleModelChart(portfolio.account_value_history, portfolio.portfolio.total_value);
-            this.updatePositions(portfolio.portfolio.positions, false);
+            this.updatePositions(portfolio.portfolio.positions, false, portfolio.portfolio.total_value);
             this.updateTrades(trades);
+            this.updateRoundTrips(roundTripsData);
             this.updateConversations(conversations);
         } catch (error) {
             console.error('Failed to load model data:', error);
@@ -194,7 +325,8 @@ class TradingApp {
 
     async loadAggregatedData() {
         try {
-            const response = await fetch('/api/aggregated/portfolio');
+            const timeParams = this.getTimeParams();
+            const response = await fetch(`/api/aggregated/portfolio?${timeParams}`);
             const data = await response.json();
 
             this.updateStats(data.portfolio, true);
@@ -264,23 +396,15 @@ class TradingApp {
         });
 
         const data = history.reverse().map(h => ({
-            time: new Date(h.timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            }),
+            time: this.formatAxisDate(new Date(h.timestamp.replace(' ', 'T') + 'Z')),
             value: h.total_value
         }));
 
-        if (currentValue !== undefined && currentValue !== null) {
+        // 仅预设时间段（结束时间为当前时刻）追加当前账户值；自定义历史时间段不追加
+        if (currentValue !== undefined && currentValue !== null && this.timeRange !== 'custom') {
             const now = new Date();
-            const currentTime = now.toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
             data.push({
-                time: currentTime,
+                time: this.formatAxisDate(now),
                 value: currentValue
             });
         }
@@ -402,13 +526,9 @@ class TradingApp {
             return timeA - timeB;
         });
 
-        // Format time labels for display
+        // Format time labels for display (long ranges show date)
         const formattedTimeAxis = timeAxis.map(timestamp => {
-            return new Date(timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString('zh-CN', {
-                timeZone: 'Asia/Shanghai',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
+            return this.formatAxisDate(new Date(timestamp.replace(' ', 'T') + 'Z'));
         });
 
         // Prepare series data for each model
@@ -500,14 +620,14 @@ class TradingApp {
         }, 100);
     }
 
-    updatePositions(positions, isAggregated = false) {
+    updatePositions(positions, isAggregated = false, totalValue = null) {
         const tbody = document.getElementById('positionsBody');
 
         if (positions.length === 0) {
             if (isAggregated) {
-                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">聚合视图暂无持仓</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">聚合视图暂无持仓</td></tr>';
             } else {
-                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无持仓</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无持仓</td></tr>';
             }
             return;
         }
@@ -527,6 +647,13 @@ class TradingApp {
                 pnlClass = this.getPnlClass(pos.pnl, true);
             }
 
+            // 占比 = 各仓保证金占用（成本÷杠杆）÷ 账户总值
+            let ratioText = '-';
+            if (totalValue && totalValue > 0) {
+                const marginUsed = (pos.quantity * pos.avg_price) / pos.leverage;
+                ratioText = `${(marginUsed / totalValue * 100).toFixed(1)}%`;
+            }
+
             return `
                 <tr>
                     <td><strong>${pos.coin}</strong></td>
@@ -536,6 +663,7 @@ class TradingApp {
                     <td>${currentPrice}</td>
                     <td>${pos.leverage}x</td>
                     <td class="${pnlClass}"><strong>${pnlDisplay}</strong></td>
+                    <td>${ratioText}</td>
                 </tr>
             `;
         }).join('');
@@ -581,6 +709,90 @@ class TradingApp {
                 </tr>
             `;
         }).join('');
+    }
+
+    updateRoundTrips(data) {
+        // data 结构: { round_trips: [...], stats: {...} }
+        const stats = data.stats || {};
+
+        // === 统计卡片 ===
+        document.getElementById('statTotalTrades').textContent = stats.total_trades || 0;
+        document.getElementById('statClosedRounds').textContent = stats.closed_round_trips || 0;
+        document.getElementById('statOpenRounds').textContent = stats.open_round_trips || 0;
+
+        const winRateEl = document.getElementById('statWinRate');
+        winRateEl.textContent = (stats.closed_round_trips > 0)
+            ? `${(stats.win_rate || 0).toFixed(1)}%`
+            : '-';
+        winRateEl.className = 'stat-value';  // 胜率保持中性色
+
+        const pnlEl = document.getElementById('statRealizedPnl');
+        pnlEl.textContent = this.formatPnl(stats.total_realized_pnl || 0, true);
+        pnlEl.className = `stat-value ${this.getPnlClass(stats.total_realized_pnl || 0, true)}`;
+
+        document.getElementById('statTotalFee').textContent = `$${(stats.total_fee || 0).toFixed(2)}`;
+
+        // === 回合配对表 ===
+        const tbody = document.getElementById('roundTripsBody');
+        const trips = data.round_trips || [];
+
+        if (trips.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无交易回合</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = trips.map(trip => {
+            const isClosed = trip.status === 'closed';
+            const isReplaced = trip.status === 'replaced';
+            const sideBadge = trip.side === 'short' ? 'badge-short' : 'badge-long';
+            const sideText = trip.side === 'short' ? '空' : '多';
+
+            let statusBadge = 'badge-close', statusText = '已平仓';
+            if (isReplaced) {
+                statusBadge = 'badge-sell';
+                statusText = '被替换';
+            } else if (!isClosed) {
+                statusBadge = 'badge-buy';
+                statusText = '持仓中';
+            }
+
+            const openPrice = trip.open_price != null ? `$${Number(trip.open_price).toFixed(2)}` : '—';
+            const closePrice = trip.close_price != null ? `$${Number(trip.close_price).toFixed(2)}` : '—';
+
+            const returnText = (trip.return_pct != null)
+                ? `${trip.return_pct >= 0 ? '+' : ''}${trip.return_pct.toFixed(2)}%`
+                : '—';
+            const returnClass = (trip.return_pct != null) ? this.getPnlClass(trip.return_pct, true) : '';
+
+            const pnlText = (trip.pnl != null) ? this.formatPnl(trip.pnl, true) : '—';
+            const pnlClass = (trip.pnl != null) ? this.getPnlClass(trip.pnl, true) : '';
+
+            const rowStyle = isReplaced ? ' style="opacity: 0.5;"' : '';
+
+            return `
+                <tr${rowStyle}>
+                    <td><strong>${trip.coin}</strong></td>
+                    <td><span class="badge ${sideBadge}">${sideText}</span></td>
+                    <td>${openPrice}</td>
+                    <td>${closePrice}</td>
+                    <td class="${returnClass}">${returnText}</td>
+                    <td class="${pnlClass}">${pnlText}</td>
+                    <td>${trip.duration_seconds != null ? this.formatDuration(trip.duration_seconds) : '—'}</td>
+                    <td><span class="badge ${statusBadge}">${statusText}</span></td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    formatDuration(seconds) {
+        if (seconds == null || seconds < 0) return '—';
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        if (days > 0) return `${days}d ${hours}h`;
+        if (hours > 0) return `${hours}h ${mins}m`;
+        if (mins > 0) return `${mins}m`;
+        return `${seconds}s`;
     }
 
     updateConversations(conversations) {

@@ -63,11 +63,21 @@ class Database:
                 avg_price REAL NOT NULL,
                 leverage INTEGER DEFAULT 1,
                 side TEXT DEFAULT 'long',
+                stop_loss REAL DEFAULT NULL,
+                profit_target REAL DEFAULT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (model_id) REFERENCES models(id),
                 UNIQUE(model_id, coin, side)
             )
         ''')
+
+        # Migration: Add stop_loss / profit_target columns if they don't exist
+        cursor.execute("PRAGMA table_info(portfolios)")
+        portfolio_columns = [col[1] for col in cursor.fetchall()]
+        if 'stop_loss' not in portfolio_columns:
+            cursor.execute("ALTER TABLE portfolios ADD COLUMN stop_loss REAL DEFAULT NULL")
+        if 'profit_target' not in portfolio_columns:
+            cursor.execute("ALTER TABLE portfolios ADD COLUMN profit_target REAL DEFAULT NULL")
         
         # Trades table
         cursor.execute('''
@@ -118,7 +128,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trading_frequency_minutes INTEGER DEFAULT 60,
-                trading_fee_rate REAL DEFAULT 0.001,
+                trading_fee_rate REAL DEFAULT 0.002,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -129,7 +139,7 @@ class Database:
         if cursor.fetchone()[0] == 0:
             cursor.execute('''
                 INSERT INTO settings (trading_frequency_minutes, trading_fee_rate)
-                VALUES (60, 0.001)
+                VALUES (60, 0.002)
             ''')
 
         conn.commit()
@@ -151,20 +161,23 @@ class Database:
     
     # ============ Portfolio Management ============
     
-    def update_position(self, model_id: int, coin: str, quantity: float, 
-                       avg_price: float, leverage: int = 1, side: str = 'long'):
-        """Update position"""
+    def update_position(self, model_id: int, coin: str, quantity: float,
+                       avg_price: float, leverage: int = 1, side: str = 'long',
+                       stop_loss: float = None, profit_target: float = None):
+        """Update position (stop_loss / profit_target 为 AI 设定的风控价，用于引擎兜底执行)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO portfolios (model_id, coin, quantity, avg_price, leverage, side, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO portfolios (model_id, coin, quantity, avg_price, leverage, side, stop_loss, profit_target, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(model_id, coin, side) DO UPDATE SET
                 quantity = excluded.quantity,
                 avg_price = excluded.avg_price,
                 leverage = excluded.leverage,
+                stop_loss = excluded.stop_loss,
+                profit_target = excluded.profit_target,
                 updated_at = CURRENT_TIMESTAMP
-        ''', (model_id, coin, quantity, avg_price, leverage, side))
+        ''', (model_id, coin, quantity, avg_price, leverage, side, stop_loss, profit_target))
         conn.commit()
         conn.close()
     
@@ -188,11 +201,15 @@ class Database:
         cursor.execute('SELECT initial_capital FROM models WHERE id = ?', (model_id,))
         initial_capital = cursor.fetchone()['initial_capital']
         
-        # Calculate realized P&L (sum of all trade P&L)
+        # Calculate realized P&L and total fees (pnl 已含开仓/平仓手续费，故为净盈亏)
         cursor.execute('''
-            SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM trades WHERE model_id = ?
+            SELECT COALESCE(SUM(pnl), 0) as total_pnl,
+                   COALESCE(SUM(fee), 0) as total_fee
+            FROM trades WHERE model_id = ?
         ''', (model_id,))
-        realized_pnl = cursor.fetchone()['total_pnl']
+        pnl_row = cursor.fetchone()
+        realized_pnl = pnl_row['total_pnl']
+        total_fee = pnl_row['total_fee']
         
         # Calculate margin used
         margin_used = sum([p['quantity'] * p['avg_price'] / p['leverage'] for p in positions])
@@ -245,7 +262,8 @@ class Database:
             'margin_used': margin_used,
             'total_value': total_value,
             'realized_pnl': realized_pnl,
-            'unrealized_pnl': unrealized_pnl
+            'unrealized_pnl': unrealized_pnl,
+            'total_fee': total_fee
         }
     
     def close_position(self, model_id: int, coin: str, side: str = 'long'):
@@ -267,23 +285,205 @@ class Database:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO trades (model_id, coin, signal, quantity, price, leverage, side, pnl, fee)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)  # 新增fee字段
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (model_id, coin, signal, quantity, price, leverage, side, pnl, fee))  # 传入fee值
         conn.commit()
         conn.close()
     
-    def get_trades(self, model_id: int, limit: int = 50) -> List[Dict]:
-        """Get trade history"""
+    def get_trades(self, model_id: int, limit: int = 50,
+                   start_time: str = None, end_time: str = None) -> List[Dict]:
+        """Get trade history
+
+        Args:
+            model_id: Model ID
+            limit: Max records to return
+            start_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+            end_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM trades WHERE model_id = ?
-            ORDER BY timestamp DESC LIMIT ?
-        ''', (model_id, limit))
+        sql = 'SELECT * FROM trades WHERE model_id = ?'
+        params = [model_id]
+        if start_time:
+            sql += ' AND timestamp >= ?'
+            params.append(start_time)
+        if end_time:
+            sql += ' AND timestamp <= ?'
+            params.append(end_time)
+        sql += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
-    
+
+    # ============ Round-Trip Trade View ============
+
+    def get_round_trips(self, model_id: int, limit: int = 100,
+                        start_time: str = None, end_time: str = None) -> Dict:
+        """构建回合配对视图：把开仓和平仓配成完整的一笔交易，并计算复盘统计
+
+        配对规则:
+        - buy_to_enter / sell_to_enter 视为开仓；同一(币种, 方向)的后续开仓会覆盖旧持仓，故直接新建回合
+        - close_position 匹配最近一次同(币种, 方向)的开仓
+        - 无匹配开仓的平仓（修复 bug 前的历史持仓）通过 net_pnl + fee 反推开仓价
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        sql = 'SELECT * FROM trades WHERE model_id = ?'
+        params = [model_id]
+        if start_time:
+            sql += ' AND timestamp >= ?'
+            params.append(start_time)
+        if end_time:
+            sql += ' AND timestamp <= ?'
+            params.append(end_time)
+        sql += ' ORDER BY timestamp ASC, id ASC'
+        cursor.execute(sql, params)
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        open_signals = {'buy_to_enter', 'sell_to_enter'}
+        round_trips = []
+        open_map = {}            # (coin, side) -> 当前未平仓的回合
+        closed_count = 0
+        win_count = 0
+        total_realized_pnl = 0.0
+        total_fee = 0.0
+
+        def _finalize_close(rt: Dict, close_price: float, close_time: str,
+                            pnl: float, fee: float) -> None:
+            """填充平仓信息并累计统计"""
+            # 回合净盈亏 = 平仓净利润 - 开仓费；回合总费用 = 开仓费 + 平仓费
+            open_fee = rt.get('open_fee') or 0.0
+            net_pnl = pnl - open_fee
+            rt['close_price'] = close_price
+            rt['close_time'] = close_time
+            rt['pnl'] = net_pnl
+            rt['fee'] = open_fee + fee
+            rt['status'] = 'closed'
+
+            # 收益率（按价格涨跌幅）
+            if rt['open_price'] and rt['open_price'] > 0:
+                if rt['side'] == 'long':
+                    rt['return_pct'] = (close_price - rt['open_price']) / rt['open_price'] * 100
+                else:
+                    rt['return_pct'] = (rt['open_price'] - close_price) / rt['open_price'] * 100
+
+            # 持仓时长
+            if rt['open_time']:
+                try:
+                    fmt = '%Y-%m-%d %H:%M:%S'
+                    open_dt = datetime.strptime(rt['open_time'], fmt)
+                    close_dt = datetime.strptime(close_time, fmt)
+                    rt['duration_seconds'] = int((close_dt - open_dt).total_seconds())
+                except (ValueError, TypeError):
+                    rt['duration_seconds'] = None
+
+            nonlocal closed_count, win_count, total_realized_pnl
+            closed_count += 1
+            if net_pnl > 0:
+                win_count += 1
+            total_realized_pnl += net_pnl
+
+        for trade in trades:
+            coin = trade['coin']
+            signal = trade['signal']
+            side = trade.get('side') or 'long'
+            fee = trade.get('fee') or 0.0
+            total_fee += fee
+
+            key = (coin, side)
+
+            if signal in open_signals:
+                # 同一(币种,方向)已有未平仓回合：旧持仓会被新开仓覆盖，标记为 replaced
+                old_rt = open_map.get(key)
+                if old_rt is not None:
+                    old_rt['status'] = 'replaced'
+                    old_rt['replaced_by'] = trade['timestamp']
+                # 开仓：新建一个回合
+                rt = {
+                    'coin': coin,
+                    'side': side,
+                    'quantity': trade['quantity'],
+                    'leverage': trade['leverage'],
+                    'open_price': trade['price'],
+                    'open_time': trade['timestamp'],
+                    'close_price': None,
+                    'close_time': None,
+                    'pnl': None,
+                    'fee': fee,
+                    'open_fee': fee,
+                    'duration_seconds': None,
+                    'return_pct': None,
+                    'status': 'open'
+                }
+                open_map[key] = rt
+                round_trips.append(rt)
+
+            elif signal == 'close_position':
+                rt = open_map.pop(key, None)
+                if rt is not None:
+                    _finalize_close(rt, trade['price'], trade['timestamp'],
+                                    trade.get('pnl') or 0.0, fee)
+                else:
+                    # 孤儿平仓（历史遗留），从 net_pnl + fee 反推开仓价
+                    # net_pnl = (close - entry) * qty - fee (long)
+                    qty = trade['quantity']
+                    close_price = trade['price']
+                    pnl = trade.get('pnl') or 0.0
+                    entry = None
+                    if qty > 0:
+                        gross = pnl + fee
+                        if side == 'long':
+                            entry = close_price - gross / qty
+                        else:
+                            entry = close_price + gross / qty
+                    rt = {
+                        'coin': coin,
+                        'side': side,
+                        'quantity': qty,
+                        'leverage': trade['leverage'],
+                        'open_price': round(entry, 8) if entry else None,
+                        'open_time': None,
+                        'close_price': close_price,
+                        'close_time': trade['timestamp'],
+                        'pnl': None,
+                        'fee': fee,
+                        'duration_seconds': None,
+                        'return_pct': None,
+                        'status': 'open'
+                    }
+                    _finalize_close(rt, close_price, trade['timestamp'], pnl, fee)
+                    round_trips.append(rt)
+
+            # hold 等其他信号忽略
+
+        # 排序：已平仓 > 持仓中 > 被替换，同状态内按时间倒序
+        status_rank = {'closed': 2, 'open': 1, 'replaced': 0}
+        round_trips.sort(key=lambda r: (status_rank.get(r['status'], 0),
+                                        r.get('close_time') or r.get('open_time') or ''),
+                         reverse=True)
+
+        closed_returns = [r['return_pct'] for r in round_trips
+                          if r['status'] == 'closed' and r['return_pct'] is not None]
+        stats = {
+            'total_trades': len(trades),
+            'total_round_trips': len(round_trips),
+            'closed_round_trips': closed_count,
+            'open_round_trips': sum(1 for r in round_trips if r['status'] == 'open'),
+            'win_rate': (win_count / closed_count * 100) if closed_count > 0 else 0.0,
+            'total_realized_pnl': total_realized_pnl,
+            'total_fee': total_fee,
+            'avg_return_pct': (round(sum(closed_returns) / len(closed_returns), 2)
+                               if closed_returns else None)
+        }
+
+        return {
+            'round_trips': round_trips[:limit],
+            'stats': stats
+        }
+
     # ============ Conversation History ============
     
     def add_conversation(self, model_id: int, user_prompt: str, 
@@ -298,14 +498,29 @@ class Database:
         conn.commit()
         conn.close()
     
-    def get_conversations(self, model_id: int, limit: int = 20) -> List[Dict]:
-        """Get conversation history"""
+    def get_conversations(self, model_id: int, limit: int = 20,
+                          start_time: str = None, end_time: str = None) -> List[Dict]:
+        """Get conversation history
+
+        Args:
+            model_id: Model ID
+            limit: Max records to return
+            start_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+            end_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM conversations WHERE model_id = ?
-            ORDER BY timestamp DESC LIMIT ?
-        ''', (model_id, limit))
+        sql = 'SELECT * FROM conversations WHERE model_id = ?'
+        params = [model_id]
+        if start_time:
+            sql += ' AND timestamp >= ?'
+            params.append(start_time)
+        if end_time:
+            sql += ' AND timestamp <= ?'
+            params.append(end_time)
+        sql += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
@@ -324,14 +539,29 @@ class Database:
         conn.commit()
         conn.close()
     
-    def get_account_value_history(self, model_id: int, limit: int = 100) -> List[Dict]:
-        """Get account value history"""
+    def get_account_value_history(self, model_id: int, limit: int = 100,
+                                  start_time: str = None, end_time: str = None) -> List[Dict]:
+        """Get account value history
+
+        Args:
+            model_id: Model ID
+            limit: Max records to return
+            start_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+            end_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM account_values WHERE model_id = ?
-            ORDER BY timestamp DESC LIMIT ?
-        ''', (model_id, limit))
+        sql = 'SELECT * FROM account_values WHERE model_id = ?'
+        params = [model_id]
+        if start_time:
+            sql += ' AND timestamp >= ?'
+            params.append(start_time)
+        if end_time:
+            sql += ' AND timestamp <= ?'
+            params.append(end_time)
+        sql += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
@@ -378,8 +608,15 @@ class Database:
 
         return result
 
-    def get_multi_model_chart_data(self, limit: int = 100) -> List[Dict]:
-        """Get chart data for all models to display in multi-line chart"""
+    def get_multi_model_chart_data(self, limit: int = 100,
+                                   start_time: str = None, end_time: str = None) -> List[Dict]:
+        """Get chart data for all models to display in multi-line chart
+
+        Args:
+            limit: Max records per model
+            start_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+            end_time: Optional UTC time string 'YYYY-MM-DD HH:MM:SS' (inclusive)
+        """
         conn = self.get_connection()
         cursor = conn.cursor()
 
@@ -394,12 +631,17 @@ class Database:
             model_name = model['name']
 
             # Get account value history for this model
-            cursor.execute('''
-                SELECT timestamp, total_value FROM account_values
-                WHERE model_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            ''', (model_id, limit))
+            sql = 'SELECT timestamp, total_value FROM account_values WHERE model_id = ?'
+            params = [model_id]
+            if start_time:
+                sql += ' AND timestamp >= ?'
+                params.append(start_time)
+            if end_time:
+                sql += ' AND timestamp <= ?'
+                params.append(end_time)
+            sql += ' ORDER BY timestamp DESC LIMIT ?'
+            params.append(limit)
+            cursor.execute(sql, params)
 
             history = cursor.fetchall()
 
@@ -446,7 +688,7 @@ class Database:
             # Return default settings if none exist
             return {
                 'trading_frequency_minutes': 60,
-                'trading_fee_rate': 0.001
+                'trading_fee_rate': 0.002
             }
 
     def update_settings(self, trading_frequency_minutes: int, trading_fee_rate: float) -> bool:
